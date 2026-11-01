@@ -83,6 +83,8 @@ var lastEvalMs = 0;
 var lastHaPublished = "";
 var haBatchTimer = null;
 var haBatchPending = false;
+var haRetryTimer = null;
+var haRetryDelayMs = 5000;
 var inputWarned = false;
 
 function log(msg) {
@@ -91,6 +93,22 @@ function log(msg) {
 
 function nowMs() {
   return Shelly.getUptimeMs();
+}
+
+function haScheduleRetry() {
+  if (haRetryTimer !== null) return;
+
+  log("HA retry in " + haRetryDelayMs + " ms");
+
+  haRetryTimer = Timer.set(haRetryDelayMs, false, function() {
+    haRetryTimer = null;
+    haSendState();
+  });
+
+  haRetryDelayMs *= 2;
+  if (haRetryDelayMs > 60000) {
+    haRetryDelayMs = 60000;
+  }
 }
 
 function haPublishState(val) {
@@ -142,18 +160,24 @@ function haSendState() {
           "Content-Type": "application/json"
         },
         body: body,
-        timeout: 5000
+        timeout: 5
       },
       function(result, errorCode, errorMessage) {
         if (errorCode) {
           log("HA HTTP failed: " + errorCode + " " + (errorMessage || ""));
+          haScheduleRetry();
+        } else if (!result || result.code < 200 || result.code >= 300) {
+          log("HA HTTP rejected: " + (result ? result.code : 0));
+          haScheduleRetry();
         } else {
           lastHaPublished = val;
+          haRetryDelayMs = 5000;
         }
       }
     );
   } catch (e) {
     log("HA publish error: " + e);
+    haScheduleRetry();
   }
 }
 
@@ -485,14 +509,14 @@ function start() {
     " ms, openLevel=" + CONFIG.openLevel
   );
 
+  restoreState();
+
   if (!CONFIG.haToken) {
     log("WARNING: CONFIG.haToken not set - Home Assistant updates disabled");
   } else {
     log("Home Assistant updates enabled for " + CONFIG.haStateEntity);
     haPublishState(state);
   }
-
-  restoreState();
 
   // Level timing starts now, so an already-open/closed gate is reported
   // after the confirm interval instead of immediately.
